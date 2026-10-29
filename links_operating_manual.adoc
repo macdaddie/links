@@ -1,0 +1,556 @@
+= `links` Operating Manual
+:toc: left
+:toclevels: 3
+:source-highlighter: highlight.js
+
+== Purpose
+
+`links` is a Bash function for inspecting filesystem links associated with one supplied pathname.
+
+The function treats regular files and symbolic links differently:
+
+* For a regular file, it reports the number of additional hard-link paths and can list those paths.
+* For a symbolic link, it reports the stored target and whether the link is valid or broken.
+* For a broken symbolic link, it can search for a replacement target and repair the link.
+
+The function does not search for symbolic links that point to a regular file. Filesystems do not maintain a reverse index of symbolic links, and that search would require an unnecessary filesystem traversal.
+
+== Requirements
+
+=== Shell
+
+`links` requires Bash. Load the function into the current shell before using it:
+
+[source,bash]
+----
+source /Users/cwebster/.config/bash/general/functions/links/links_func.sh
+----
+
+To make the function available in every interactive Bash session, source `links_func.sh` from the appropriate Bash startup file.
+
+=== Commands
+
+The standard operating mode uses commands normally provided by macOS or Linux:
+
+[cols="1,3"]
+|===
+|Command |Purpose
+
+|`stat`
+|Reads the inode, device, and hard-link count.
+
+|`readlink`
+|Reads the target stored in a symbolic link.
+
+|`realpath`
+|Produces canonical absolute paths.
+
+|`find`
+|Discovers hard-link paths and, by default, repair candidates.
+
+|`df`
+|Determines the filesystem mount point for an unrestricted hard-link search.
+
+|`ln`, `mv`, `rm`
+|Create and install a repaired symbolic link and clean up after a failed replacement.
+|===
+
+The optional `--fd` mode also requires `fd`. The function checks for `fd` before starting a repair search.
+
+== Command Syntax
+
+[source,text]
+----
+links [options] FILE
+----
+
+Exactly one `FILE` must be supplied. Put options before the pathname. Use `--` before a pathname that begins with a hyphen:
+
+[source,bash]
+----
+links -- "-unusual-name"
+----
+
+== Options
+
+[cols="1,2,4"]
+|===
+|Option |Applies to |Description
+
+|`-l`
+|Regular files
+|Lists the additional hard-link paths. Without `-l`, the function reports only the count.
+
+|`-H`
+|Link-type filter
+|Limits processing to hard links. If the supplied pathname is a symbolic link, the function reports that no hard-link processing applies and exits.
+
+|`-S`
+|Link-type filter
+|Limits processing to symbolic links. The function does not search for symbolic links pointing to a regular file.
+
+|`-p DIR`
+|Hard-link listing
+|Restricts a `-l` hard-link search to `DIR`. The directory is canonicalized before the search begins.
+
+|`--fix`
+|Broken symbolic links
+|Searches from `/` for a possible replacement target. The function warns that a whole-filesystem search may take considerable time.
+
+|`--fix=DIR`
+|Broken symbolic links
+|Restricts the repair search to `DIR`. The equals sign is required. Use quoting when the directory contains spaces, for example `--fix="$HOME/My Documents"`.
+
+|`--fd`
+|Broken-link repair
+|Uses `fd` instead of `find` for candidate discovery. This option is valid only with `--fix` or `--fix=DIR`.
+
+|`-h`, `--help`
+|All modes
+|Displays command help and exits.
+|===
+
+`-H` and `-S` are mutually exclusive.
+
+`-p DIR` cannot be combined with `--fix`. Use `--fix=DIR` to set the repair search directory.
+
+== Operational Model
+
+[[links-decision-flow]]
+=== Decision Flow
+
+The following activity diagram shows the principal decisions made for each invocation. Error paths return status `1` unless the error is an invalid option or option combination, which returns status `2`.
+
+[plantuml,links_decision_flow,svg]
+----
+@startuml
+skinparam monochrome true
+skinparam shadowing false
+skinparam activity {
+  BackgroundColor white
+  BorderColor black
+  DiamondBackgroundColor white
+  DiamondBorderColor black
+}
+
+start
+:Parse and validate options;
+if (Options valid?) then (yes)
+else (no)
+  :Report usage error;
+  stop
+endif
+
+if (Path exists or is a symlink?) then (yes)
+else (no)
+  :Report file not found;
+  stop
+endif
+
+if (Symbolic link?) then (yes)
+  :Read stored target;
+  if (-H selected?) then (yes)
+    :Report that hard-link mode does not apply;
+    stop
+  endif
+
+  if (Target exists?) then (yes)
+    :Report valid link and canonical source;
+    stop
+  else (no)
+    :Report broken link and stored target;
+  endif
+
+  if (--fix selected?) then (yes)
+    if (--fd requested but unavailable?) then (yes)
+      :Report missing fd;
+      stop
+    endif
+
+    :Choose / or --fix directory as search root;
+    :Search for the target basename;
+    if (Candidates found?) then (yes)
+      if (Exactly one candidate?) then (yes)
+        :Select the candidate;
+      else (no)
+        if (Interactive terminal?) then (yes)
+          :Display numbered candidates;
+          if (User selects a candidate?) then (yes)
+            :Select the candidate;
+          else (no)
+            :Exit without changing the link;
+            stop
+          endif
+        else (no)
+          :List candidates and make no change;
+          stop
+        endif
+      endif
+
+      :Create a temporary symbolic link;
+      :Replace the broken link;
+      :Report repaired absolute target;
+      stop
+    else (no)
+      :Report that no candidate was found;
+      stop
+    endif
+  else (no)
+    :Suggest --fix and make no change;
+    stop
+  endif
+else (no)
+  if (--fix selected?) then (yes)
+    :Report that repair requires a symbolic link;
+    stop
+  endif
+
+  :Read device, inode, and st_nlink;
+  :Calculate additional links as st_nlink - 1;
+  if (Additional hard links exist?) then (yes)
+    :Report the additional hard-link count;
+  else (no)
+    :Report no hard links;
+    stop
+  endif
+
+  if (-S selected?) then (yes)
+    :Report that the path is a regular file;
+    stop
+  endif
+
+  if (-l selected?) then (yes)
+    :Choose the mount point or -p directory;
+    :Search by inode without crossing filesystems;
+    :Verify device and inode and list matching paths;
+    :Report found paths against expected paths;
+    stop
+  else (no)
+    :Suggest -l to list associated paths;
+    stop
+  endif
+endif
+@enduml
+----
+
+=== Regular Files
+
+For a regular file, `links` obtains the filesystem `st_nlink` value. This value includes the supplied pathname itself.
+
+The function reports the number of additional hard-link paths as:
+
+[source,text]
+----
+additional hard links = st_nlink - 1
+----
+
+If `st_nlink` is `1`, the file has no additional hard-link paths. The function reports `Hard links: none` and exits without searching the filesystem, regardless of `-l`, `-H`, or `-S`.
+
+If additional hard links exist:
+
+* Without `-l`, the function reports their number and exits.
+* With `-l`, the function searches for pathnames with the same device and inode.
+* With `-S`, the function reports that the supplied pathname is a regular file and exits without a symbolic-link search.
+
+The original pathname is excluded from the hard-link listing.
+
+=== Symbolic Links
+
+For a symbolic link, `links` reads the target stored in the link itself.
+
+A valid symbolic link produces:
+
+* The symbolic-link pathname.
+* The target text stored in the link.
+* The canonical path of the existing source.
+
+A broken symbolic link produces:
+
+* The symbolic-link pathname.
+* The missing target stored in the link.
+* A message explaining that `--fix` can search for a replacement source.
+
+No filesystem search occurs unless `--fix` is supplied for a broken symbolic link.
+
+The `-l` option has no additional effect when the supplied pathname is a symbolic link.
+
+== Common Procedures
+
+=== Inspect a Regular File
+
+[source,bash]
+----
+links report.adoc
+----
+
+Example when no additional hard links exist:
+
+[source,text]
+----
+File: /path/to/report.adoc
+Inode:      123456
+Hard links: none
+----
+
+Example when two additional hard-link paths exist:
+
+[source,text]
+----
+File: /path/to/report.adoc
+Inode:      123456
+Hard links: 2 additional path(s)
+Use -l to list the associated paths.
+----
+
+=== List Hard-Link Paths
+
+[source,bash]
+----
+links -l report.adoc
+----
+
+By default, the search begins at the mount point of the filesystem containing the file and does not cross into another filesystem.
+
+To reduce the search area:
+
+[source,bash]
+----
+links -l -p "$HOME/Documents" report.adoc
+----
+
+The final summary distinguishes the number found within the selected search scope from the total number reported by the inode metadata:
+
+[source,text]
+----
+Found 1 of 2 additional hard-link path(s) in /Users/example/Documents
+----
+
+A partial result normally means that one or more hard-link paths are outside the selected directory or were inaccessible during the search.
+
+=== Inspect a Valid Symbolic Link
+
+[source,bash]
+----
+links current_report.adoc
+----
+
+Example output:
+
+[source,text]
+----
+SYMLINK (valid) current_report.adoc -> reports/report.adoc
+Source: /absolute/path/reports/report.adoc
+----
+
+Relative targets are resolved relative to the symbolic link's parent directory by the operating system.
+
+=== Inspect a Broken Symbolic Link
+
+[source,bash]
+----
+links current_report.adoc
+----
+
+Example output:
+
+[source,text]
+----
+SYMLINK (broken) current_report.adoc -> reports/report.adoc
+Use --fix to search for the missing source.
+----
+
+Inspection does not alter the broken link.
+
+=== Repair Within a Known Directory
+
+Restrict repair to the smallest practical directory:
+
+[source,bash]
+----
+links --fix="$HOME/Documents" current_report.adoc
+----
+
+The function extracts the basename from the broken target. In this example, it searches for entries named `report.adoc` beneath `$HOME/Documents`.
+
+If exactly one candidate is found, the function repairs the link automatically.
+
+=== Repair Using `fd`
+
+[source,bash]
+----
+links --fd --fix="$HOME/Documents" current_report.adoc
+----
+
+The `fd` search is unrestricted, includes hidden and normally ignored entries, and returns absolute paths. `--fd` affects only broken-link repair; hard-link discovery continues to use `find` and its inode predicate.
+
+If `fd` is unavailable, the function reports an error and exits. It does not silently fall back to `find`.
+
+=== Search the Whole Filesystem
+
+[source,bash]
+----
+links --fix current_report.adoc
+----
+
+This search starts at `/` and may traverse mounted filesystems. Runtime depends on filesystem size, device speed, mount availability, and directory permissions.
+
+Use a scoped search whenever the likely source location is known.
+
+== Ambiguous Repair
+
+Repair searches match the basename stored in the broken symbolic link. A basename is not necessarily unique.
+
+If multiple candidates are found, an interactive session displays a numbered menu:
+
+[source,text]
+----
+Multiple source candidates found:
+  1) /path/one/report.adoc
+  2) /path/two/report.adoc
+  0) Exit without repairing
+Select a source [0-2]:
+----
+
+Enter the candidate number to repair the link, or enter `0` to leave the link unchanged.
+
+Before choosing a candidate, verify that it is the intended source. Candidate discovery compares names only; it does not compare file contents, ownership, timestamps, or prior inode information.
+
+If multiple candidates are found in a non-interactive session, the function lists them, makes no change, and returns an error. Run the command in an interactive terminal to select a candidate.
+
+== Repair Behavior and Safety
+
+When a candidate is selected, the function:
+
+. Resolves the candidate to a canonical absolute path.
+. Creates a temporary symbolic link beside the broken link.
+. Replaces the broken link with the temporary link.
+. Reports the new source path.
+
+The repaired link points to an absolute path. The function does not preserve the original relative target notation.
+
+The source candidate is not modified. If replacement fails after the temporary link is created, the function removes the temporary link and reports an error.
+
+Do not use `--fix` without reviewing ambiguous candidates. Equal basenames do not prove that two files serve the same purpose.
+
+== Search Behavior
+
+=== Hard Links
+
+Hard-link discovery uses the file's inode as the initial `find` predicate. Each result is then checked against both the expected device and inode.
+
+The search uses `-xdev`, so it remains on the filesystem containing the search root. Hard links cannot cross filesystem boundaries.
+
+=== Repair Candidates
+
+The default repair search uses `find` to locate non-symlink entries with an exact matching basename.
+
+The optional `--fd` search uses `fd` with unrestricted, absolute, null-delimited output and exact-name matching. Symbolic-link candidates are excluded.
+
+Search errors caused by inaccessible directories are suppressed. A result list may therefore be incomplete when the user lacks search permission for part of the directory tree.
+
+== Colour Output
+
+Colour is enabled only when standard output is connected to a terminal.
+
+[cols="1,3"]
+|===
+|Colour |Meaning
+
+|Green
+|Valid symbolic link, repaired link, or discovered hard-link path.
+
+|Red
+|Broken symbolic link or file-not-found indication.
+
+|Cyan
+|Path and search headings.
+
+|Yellow
+|Potentially expensive whole-filesystem search warning.
+|===
+
+Set the `NO_COLOR` environment variable to disable colour explicitly:
+
+[source,bash]
+----
+NO_COLOR=1 links -l report.adoc
+----
+
+== Exit Status
+
+[cols="1,4"]
+|===
+|Status |Meaning
+
+|`0`
+|Inspection completed, help was displayed, no additional hard links exist, a repair succeeded, or the user selected `0` to cancel an ambiguous repair.
+
+|`1`
+|A pathname, source, directory, or required command could not be resolved; no repair candidate was found; ambiguous repair required non-interactive input; or a filesystem operation failed.
+
+|`2`
+|Command syntax or an option combination was invalid.
+|===
+
+A broken symbolic link inspected without `--fix` returns status `0`. The link remains broken, but the requested inspection completed successfully.
+
+== Invalid Combinations
+
+The following combinations are rejected:
+
+[cols="2,3"]
+|===
+|Combination |Reason
+
+|`-H -S`
+|Hard-only and symbolic-only modes are mutually exclusive.
+
+|`-H --fix`
+|Repair applies only to symbolic links.
+
+|`--fd` without `--fix`
+|`fd` is used only for repair candidate discovery.
+
+|`-p DIR --fix`
+|Repair scope must be supplied as `--fix=DIR`.
+|===
+
+== Troubleshooting
+
+=== `Hard links: none`
+
+The file's `st_nlink` value is `1`. No filesystem search was performed because no additional hard-link pathname can exist.
+
+=== Fewer Hard Links Are Listed Than Reported
+
+The selected `-p` directory may not contain every hard-link path. Retry with a broader directory or omit `-p` to search from the filesystem mount point.
+
+Permission restrictions can also hide paths from discovery.
+
+=== No Repair Candidate Is Found
+
+Confirm that:
+
+* The intended source still exists.
+* The source basename matches the basename stored in the broken link.
+* The selected `--fix=DIR` scope contains the source.
+* The current user can search the containing directories.
+
+Broaden the scope only when necessary.
+
+=== `--fd` Reports That `fd` Is Not Installed
+
+Install `fd` or omit `--fd` to use the standard `find` traversal.
+
+=== Multiple Candidates Are Found in Automation
+
+The function intentionally refuses to guess in a non-interactive session. Narrow the repair scope until one candidate remains, repair the link manually, or run the command interactively and select the correct candidate.
+
+== Limitations
+
+* The function accepts one pathname per invocation.
+* It does not discover symbolic links pointing to regular files.
+* Repair identifies candidates by exact basename, not by content or historical identity.
+* A repaired symbolic link uses an absolute target.
+* Search results are limited by filesystem permissions and the selected scope.
+* Whole-filesystem repair searches can be slow and can encounter unavailable mounts.

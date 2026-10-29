@@ -1,0 +1,51 @@
+= links
+
+A Bash function for inspecting hard links and inspecting or repairing symbolic links.
+
+The `links` function reports additional hard-link paths for regular files, identifies valid and broken symbolic links, and can search for a replacement target for a broken link. Regular files are never searched for symbolic links pointing to them.
+
+== Installation
+
+The function is defined in `links_func.sh`. Source that file from your Bash configuration.
+
+=== Bash
+
+Add the following line to `~/.bashrc`, replacing the path with the location of your checkout:
+
+[source,bash]
+----
+source "/path/to/links/links_func.sh"
+----
+
+=== Automatic setup
+
+To add the source line automatically, set `links_func` to the absolute path of `links_func.sh`, then run:
+
+[source,bash]
+----
+links_func="$HOME/.local/share/links/links_func.sh"
+rc="$HOME/.bashrc"
+line="source \"$links_func\""
+grep -Fqx "$line" "$rc" 2>/dev/null || printf '\n%s\n' "$line" >> "$rc"
+----
+
+Reload the configuration with `source "$HOME/.bashrc"`, or start a new Bash session.
+
+== Quick start
+
+[source,bash]
+----
+source "/path/to/links/links_func.sh"
+
+links report.adoc                              # report additional hard links
+links -l report.adoc                           # list additional hard-link paths
+links current_report.adoc                      # inspect a symbolic link
+links --fix="$HOME/Documents" current_report.adoc  # repair a broken link
+links --fd --fix="$HOME/Documents" current_report.adoc
+----
+
+The optional `--fd` mode requires `fd`. An unscoped `--fix` search starts at `/` and may take considerable time.
+
+== Documentation
+
+See link:links_operating_manual.adoc[the links operating manual] for syntax, options, behavior, repair safety, examples, troubleshooting, and the PlantUML decision diagram.
